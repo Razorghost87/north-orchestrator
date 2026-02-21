@@ -10,7 +10,7 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
-        "@octokit/rest": "^21.0.2",
+        "@octokit/rest": "19.0.13",
         "@supabase/supabase-js": "^2.46.1",
         "express": "^4.21.1",
         "node-telegram-bot-api": "^0.66.0",
