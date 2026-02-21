@@ -11,6 +11,10 @@ async function main() {
         res.json({ status: 'ok', timestamp: new Date().toISOString() });
     });
 
+    // GitHub Webhook
+    const { handleGithubWebhook } = await import('./github/webhook');
+    app.post('/github-webhook', handleGithubWebhook);
+
     // Initialize Telegram bot
     const bot = await createTelegramBot(app);
 

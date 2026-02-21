@@ -1,9 +1,13 @@
 import type { Application } from 'express';
 import TelegramBot from 'node-telegram-bot-api';
-import { runMeeting } from '../agents/meeting';
+// We replaced runMeeting with executeAgentPipeline
+import { executeAgentPipeline } from '../agents';
 import { config } from '../config';
+import { createRunContext, withContext } from '../core/context';
+import { IntentSchema } from '../core/schemas';
 import { createIssue, getLastIssue } from '../github/issues';
-import { semanticSearch } from '../memory/supabase';
+import { handleMemorySearchCommand, saveRecentChat } from '../memory/commands';
+import { telegramTools } from '../tools/telegram';
 
 export async function createTelegramBot(app: Application): Promise<TelegramBot> {
     let bot: TelegramBot;
@@ -22,83 +26,113 @@ export async function createTelegramBot(app: Application): Promise<TelegramBot> 
         console.log('✅ Telegram polling started');
     }
 
+    // Set instance in tools for abstraction
+    telegramTools.setInstance(bot);
+
     bot.on('message', async (msg) => {
         const chatId = msg.chat.id;
         const userId = msg.from?.id;
         const text = (msg.text ?? '').trim();
 
-        // Security: only allowed user
-        if (userId !== config.TELEGRAM_ALLOWED_USER_ID) {
-            return bot.sendMessage(chatId, '🚫 Unauthorized.');
-        }
+        const ctx = createRunContext('telegram');
 
-        try {
-            await routeCommand(bot, chatId, text);
-        } catch (err) {
-            console.error('Command error:', err);
-            await bot.sendMessage(chatId, `❌ Error: ${(err as Error).message}`);
-        }
+        return withContext(ctx, `Telegram Message [${chatId}]`, async () => {
+            // Security: only allowed user
+            if (userId !== config.TELEGRAM_ALLOWED_USER_ID) {
+                return telegramTools.sendMessage(ctx, chatId, '🚫 Unauthorized.');
+            }
+
+            // Save chat to memory for context
+            if (text) {
+                await saveRecentChat(ctx, userId.toString(), text);
+            }
+
+            try {
+                await routeCommand(ctx, chatId, text);
+            } catch (err) {
+                console.error('Command error:', err);
+                await telegramTools.sendMessage(ctx, chatId, `❌ Error: ${(err as Error).message}`);
+            }
+        });
     });
 
     return bot;
 }
 
-async function routeCommand(bot: TelegramBot, chatId: number, text: string) {
+async function routeCommand(ctx: ReturnType<typeof createRunContext>, chatId: number, text: string) {
     // /status
     if (text === '/status') {
         const issue = await getLastIssue();
         const msg = issue
             ? `📋 Last issue: [#${issue.number}](${issue.html_url})\nStatus: ${issue.state}`
             : '📋 No issues found.';
-        return bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+        return telegramTools.sendMessage(ctx, chatId, msg, { parse_mode: 'Markdown' });
     }
 
     // /memory search <query>
     if (text.startsWith('/memory search ')) {
         const query = text.slice('/memory search '.length).trim();
-        if (!query) return bot.sendMessage(chatId, '❓ Please provide a search query.');
-        await bot.sendMessage(chatId, `🔍 Searching memory for: "${query}"...`);
-        const results = await semanticSearch(query, 5);
-        if (!results.length) return bot.sendMessage(chatId, '📭 No relevant memories found.');
-        const reply = results
-            .map((r, i) => `*${i + 1}.* ${r.summary.slice(0, 200)}...`)
-            .join('\n\n');
-        return bot.sendMessage(chatId, `🧠 *Memory Results:*\n\n${reply}`, { parse_mode: 'Markdown' });
+        return handleMemorySearchCommand(ctx, chatId, query);
     }
 
     // SAFE: / BUILD: / BUG:
     const prefixMatch = text.match(/^(SAFE|BUILD|BUG):\s*(.+)$/is);
     if (prefixMatch) {
         const [, type, description] = prefixMatch;
-        await bot.sendMessage(chatId, `🤖 Received *${type}* command. Starting agent meeting...`, {
+        const intent = IntentSchema.parse(type);
+
+        await telegramTools.sendMessage(ctx, chatId, `🤖 Received *${intent}* command. Starting agent pipeline...`, {
             parse_mode: 'Markdown',
         });
 
-        // Create GitHub issue first
+        // For now, we still create the GitHub issue directly or let the pipeline do it?
+        // The MVP prompt says: "Worker: for now, respond with stub execution OR trigger GitHub issue/PR creation if already supported"
+        // Let's keep the legacy issue creation here, but wrap it in executeAgentPipeline.
         const issue = await createIssue(type, description);
-        await bot.sendMessage(
+        await telegramTools.sendMessage(
+            ctx,
             chatId,
             `📌 Created issue [#${issue.number}](${issue.html_url})`,
             { parse_mode: 'Markdown' }
         );
 
-        // Run multi-agent meeting
-        await bot.sendMessage(chatId, `⚙️ Running 6-agent meeting... (this may take ~60s)`);
-        const result = await runMeeting({ type, description, issueNumber: issue.number });
+        // Run multi-agent pipeline
+        await telegramTools.sendMessage(ctx, chatId, `⚙️ Running multi-agent pipeline...`);
 
-        // Post completed plan
-        await bot.sendMessage(
-            chatId,
-            `✅ Meeting complete! Plan posted to [#${issue.number}](${issue.html_url})\n\n*Risk Verdict:* ${result.riskVerdict}`,
-            { parse_mode: 'Markdown' }
-        );
-        return;
+        const result = await executeAgentPipeline(ctx, intent, description, '');
+
+        // Standardized output format requested by user
+        const finalMessage = `*${intent}: ${description.slice(0, 30)}...*
+
+*Intent:* ${result.status}
+*Trace:* \`${ctx.traceId}\`
+
+*Summary:*
+${result.summary}
+
+*Actions Taken:*
+${result.actions_taken.map(a => `- ${a}`).join('\n')}
+
+*Links:*
+${result.links ? result.links.map(l => `- [Link](${l})`).join('\n') : 'None'}
+
+*Next Steps:*
+${result.next_steps ? result.next_steps.map(s => `- ${s}`).join('\n') : 'None'}`;
+
+        return telegramTools.sendMessage(ctx, chatId, finalMessage, { parse_mode: 'Markdown' });
+    }
+
+    const helpText = `📖 Available commands:\n- \`SAFE: <description>\`\n- \`BUILD: <description>\`\n- \`BUG: <description>\`\n- \`/status\`\n- \`/memory search <query>\``;
+
+    if (text.toLowerCase() === '/help' || text.toLowerCase() === 'help') {
+        return telegramTools.sendMessage(ctx, chatId, helpText, { parse_mode: 'Markdown' });
     }
 
     // Unknown
-    await bot.sendMessage(
+    await telegramTools.sendMessage(
+        ctx,
         chatId,
-        `❓ Unknown command. Use:\n- \`SAFE: <description>\`\n- \`BUILD: <description>\`\n- \`BUG: <description>\`\n- \`/status\`\n- \`/memory search <query>\``,
+        `❓ Unknown command. ${helpText.replace('📖 Available commands:\n', '')}`,
         { parse_mode: 'Markdown' }
     );
 }
