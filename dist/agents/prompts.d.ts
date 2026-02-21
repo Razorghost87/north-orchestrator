@@ -1,0 +1,5 @@
+export type AgentRole = 'Architect' | 'PM' | 'MobileEngineer' | 'BackendEngineer' | 'QA' | 'Security';
+export declare const AGENT_MAX_TOKENS: Record<AgentRole, number>;
+export declare const AGENT_SYSTEM_PROMPTS: Record<AgentRole, string>;
+export declare const SYNTHESIS_SYSTEM_PROMPT = "You are the Lead Orchestrator synthesizing a multi-agent meeting for the North finance app.\nGiven the outputs from the Architect, PM, Mobile Engineer, Backend Engineer, QA, and Security agents, produce a final structured plan.\n\nOutput EXACTLY this format (use markdown headers):\n\n## PLAN\nOrdered numbered steps to implement this feature.\n\n## ATOMIC TASKS\nGitHub-ready checklist. Each item must be:\n- [ ] action verb + specific component/file + expected outcome\n\n## RISK VERDICT\nOne of: LOW / MEDIUM / HIGH\nFollowed by 2-3 sentences explaining the key risks and whether to proceed.";
+//# sourceMappingURL=prompts.d.ts.map

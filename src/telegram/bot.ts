@@ -10,7 +10,7 @@ export async function createTelegramBot(app: Application): Promise<TelegramBot> 
 
     if (config.WEBHOOK_URL) {
         bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { webHook: true });
-        const webhookPath = `/telegram-webhook-${config.TELEGRAM_BOT_TOKEN}`;
+        const webhookPath = `/telegram-webhook`;
         await bot.setWebHook(`${config.WEBHOOK_URL}${webhookPath}`);
         app.post(webhookPath, (req, res) => {
             bot.processUpdate(req.body);
